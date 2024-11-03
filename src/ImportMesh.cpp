@@ -23,10 +23,19 @@
     return textures;
 }*/
 
-//generate mesh
-static inline Smok::Asset::Mesh::Mesh processMesh(aiMesh* mesh, const aiScene* scene)
+//defines a slim pair data struct for vertices and their indices returned by Assimp
+//this is unoptimized data Smok won't handle
+//this data is optimized after all vertex and index data is pulled
+struct Vertex_Index_Data
 {
-    Smok::Asset::Mesh::Mesh m;
+    std::vector<Smok::Asset::Mesh::Vertex> vertices; //the vertices
+    std::vector<uint32_t> indices; //the indices
+};
+
+//pulls mesh data from the Assimp construct
+static inline Vertex_Index_Data processMesh(aiMesh* mesh, const aiScene* scene)
+{
+    Vertex_Index_Data indexVertexData;
    // vector<Texture> textures;
 
     //vertices
@@ -50,7 +59,7 @@ static inline Smok::Asset::Mesh::Mesh processMesh(aiMesh* mesh, const aiScene* s
         else
             vertex.textureCoords = { 0.0f, 0.0f };
 
-        m.vertices.emplace_back(vertex);
+        indexVertexData.vertices.emplace_back(vertex);
     }
 
     //indices
@@ -58,7 +67,7 @@ static inline Smok::Asset::Mesh::Mesh processMesh(aiMesh* mesh, const aiScene* s
     {
         aiFace face = mesh->mFaces[i];
         for (size_t j = 0; j < face.mNumIndices; j++)
-            m.indices.emplace_back(face.mIndices[j]);
+            indexVertexData.indices.emplace_back(face.mIndices[j]);
     }
 
     //materials
@@ -73,22 +82,22 @@ static inline Smok::Asset::Mesh::Mesh processMesh(aiMesh* mesh, const aiScene* s
         textures.insert(textures.end(), specularMaps.begin(), specularMaps.end());
     }*/
 
-    return m;
+    return indexVertexData;
 }
 
-//process the mesh node
-static inline void processNode(aiNode* node, const aiScene* scene, Smok::Asset::Mesh::StaticMesh& staticMesh)
+//process the mesh node into the vertex and index data
+static inline void processNode(aiNode* node, const aiScene* scene, std::vector<Vertex_Index_Data>& assimpMeshData)
 {
     // process all the node's meshes (if any)
     for (size_t i = 0; i < node->mNumMeshes; i++)
     {
         aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
-        staticMesh.meshes.emplace_back(processMesh(mesh, scene));
+        assimpMeshData.emplace_back(processMesh(mesh, scene));
     }
     // then do the same for each of its children
     for (size_t i = 0; i < node->mNumChildren; i++)
     {
-        processNode(node->mChildren[i], scene, staticMesh);
+        processNode(node->mChildren[i], scene, assimpMeshData);
     }
 }
 
@@ -103,9 +112,37 @@ bool Smok::AssetConvertionTool::Mesh::ConvertStaticMesh(const char* rawMeshPath,
         fmt::print("ERROR::ASSIMP::%s\n", importer.GetErrorString());
         return false;
     }
-   // directory = path.substr(0, path.find_last_of('/'));
 
-    processNode(scene->mRootNode, scene, staticMesh);
+    //process the raw vertex data from assimp
+    std::vector<Vertex_Index_Data> assimpMeshData;
+    processNode(scene->mRootNode, scene, assimpMeshData);
+
+    //packs it all into one vertex array so we can optimize it
+    size_t totalVerticesMakingUpSubMeshesCount = staticMesh.vertices.size(); //the total vertices making up all the sub-meshes of this mesh
+    for (size_t mesh = 0; mesh < assimpMeshData.size(); ++mesh)
+    {
+        //generates a sub-mesh
+        Smok::Asset::Mesh::Mesh m;
+
+        //goes through the vertices and check if they're in the larger vertex mesh buffer
+        size_t vIndex = 0;
+        for (size_t i = 0; i < assimpMeshData[mesh].indices.size(); ++i)
+        {
+            //if it's one we previouslly had
+            if (Smok::Asset::Mesh::VertexIsAlreadyInArray(staticMesh.vertices.data(), totalVerticesMakingUpSubMeshesCount,
+                assimpMeshData[mesh].vertices[assimpMeshData[mesh].indices[i]], vIndex))
+                m.indices.emplace_back(vIndex);
+
+            else //if it is a new vertex
+            {
+                staticMesh.vertices.emplace_back(assimpMeshData[mesh].vertices[assimpMeshData[mesh].indices[i]]);
+                m.indices.emplace_back(totalVerticesMakingUpSubMeshesCount);
+                totalVerticesMakingUpSubMeshesCount++;
+            }
+        }
+
+        staticMesh.meshes.emplace_back(m);
+    }
 
 	return true;
 }
